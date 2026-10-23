@@ -21,6 +21,7 @@ import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown } from "lucid
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
 import { useEffect, useRef, useState } from "react";
+import { useDiffPanelViewport } from "./diffs/useDiffPanelViewport";
 import { useCodeViewFileReveal } from "./diffs/useCodeViewFileReveal";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import { useOpenInPreferredEditor } from "../editorPreferences";
@@ -297,6 +298,10 @@ export default function DiffPanel({
   const collapseScopeKey = routeThreadRef
     ? `${routeThreadRef.environmentId}:${routeThreadRef.threadId}:${reviewSectionId}`
     : null;
+  const viewportScope = JSON.stringify([
+    routeThreadRef?.environmentId, routeThreadRef?.threadId, activeCwd,
+    diffSelection.kind, selectedBaseRef, selectedTurn?.runId,
+  ]);
   const codeViewMountKey = `${collapseScopeKey ?? reviewSectionId}:${codeViewRevision}`;
   const reviewSectionTitle = selectedTurn
     ? `Turn ${selectedCheckpointTurnCount ?? "?"}`
@@ -447,6 +452,8 @@ export default function DiffPanel({
     fileStates,
     retry,
     requestFile,
+    requestPaths,
+    requestedFilePaths,
     readyFilePaths,
     renderableFiles,
     settledFileCount,
@@ -555,7 +562,22 @@ export default function DiffPanel({
     selectedGitSource?.diffHash,
   ]);
   const requestTreeReveal = useCodeViewFileReveal(codeView, treeRevealScope, codeViewFileKeys);
+  const viewport = useDiffPanelViewport({
+    scope: viewportScope,
+    viewer: codeView,
+    visible,
+    loading: isLoadingSelectedPatch,
+    selection: diffSelection,
+    files: renderableFileEntries.map(({ fileDiff, fileKey }) => ({
+      filePath: resolveFileDiffPath(fileDiff), fileKey,
+      collapsed: collapsedDiffFileKeys.has(fileKey),
+    })),
+    requestedFilePaths,
+    fileStates,
+    requestPaths,
+  });
   const revealDiffFile = (filePath: string) => {
+    viewport.cancel();
     const index = renderableFileEntries.findIndex(
       (candidate) => resolveFileDiffPath(candidate.fileDiff) === filePath,
     );
@@ -573,18 +595,23 @@ export default function DiffPanel({
     return true;
   };
 
-  const externalRevealRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!selectedFilePath) {
-      externalRevealRef.current = null;
-      return;
-    }
-    const key = JSON.stringify([collapseScopeKey, selectedFilePath, selectedFileRevealRequestId]);
-    if (externalRevealRef.current === key) return;
-    if (revealDiffFile(selectedFilePath)) {
-      externalRevealRef.current = key;
-    }
-  }, [collapseScopeKey, selectedFilePath, selectedFileRevealRequestId, revealDiffFile]);
+    if (!selectedFilePath || useDiffPanelSessionStore.getState().consumedTurnFileSelections.has(diffSelection)) return;
+    const file = renderableFileEntries.find((entry) => resolveFileDiffPath(entry.fileDiff) === selectedFilePath);
+    if (!file) return;
+    // Consume only when the live viewer accepts the request. If loading/unmount
+    // wins first, the same selection remains pending for the next panel mount.
+    updateCollapsedDiffFiles((current) => {
+      if (!current.has(file.fileKey)) return current;
+      const next = new Set(current);
+      next.delete(file.fileKey);
+      return next;
+    });
+    const item = codeView?.getInstance()?.getItem(file.fileKey);
+    if (!codeView || !item || item.collapsed) return;
+    codeView.scrollTo({ type: "item", id: file.fileKey, align: "start" });
+    useDiffPanelSessionStore.getState().consumedTurnFileSelections.add(diffSelection);
+  }, [diffSelection, selectedFilePath, codeView, renderableFileEntries, updateCollapsedDiffFiles]);
 
   const openDiffFile = (filePath: string) => {
     openDiffFilePrimaryAction({
@@ -613,6 +640,7 @@ export default function DiffPanel({
   };
   // Every file header holds these; a new identity per collapse change would redraw them all.
   const toggleDiffFileCollapsed = useStableCallback((fileKey: string) => {
+    viewport.cancel();
     updateCollapsedDiffFiles((current) => {
       const next = new Set(current);
       if (next.has(fileKey)) {
@@ -625,6 +653,7 @@ export default function DiffPanel({
   });
   // Find can ask again before the unfolded file reaches the viewer, so this must never fold.
   const unfoldDiffFile = useStableCallback((fileKey: string) => {
+    viewport.cancel();
     updateCollapsedDiffFiles((current) => {
       if (!current.has(fileKey)) return current;
       const next = new Set(current);
@@ -634,6 +663,7 @@ export default function DiffPanel({
   });
 
   const toggleDiffFileCollapse = () => {
+    viewport.cancel();
     setCodeViewRevision((current) => current + 1);
     updateCollapsedDiffFiles((current) => toggleAllDiffFiles(diffFileKeys, current));
   };
@@ -1093,8 +1123,11 @@ export default function DiffPanel({
                   }}
                 >
                   <AnnotatableCodeView
-                    key={collapseScopeKey ?? reviewSectionId}
+                    key={viewportScope}
                     viewerRef={setCodeView}
+                    containerRef={viewport.containerRef}
+                    onScroll={viewport.onScroll}
+                    onNavigationStart={viewport.cancel}
                     codeViewKey={`${codeViewMountKey}:${lazySource ? filePatchScope : "preview"}`}
                     className="h-full min-h-0 overflow-auto"
                     files={codeViewFiles}

@@ -3,6 +3,8 @@ import type { RunId, ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import type { DiffPanelViewport } from "./components/diffs/diffPanelViewport";
+
 import { resolveStorage } from "./lib/storage";
 
 export type DiffPanelSelection =
@@ -131,6 +133,9 @@ export const useDiffPanelStore = create<DiffPanelStoreState>()(
 );
 
 interface DiffPanelSessionStoreState {
+  viewportByScopeKey: Record<string, DiffPanelViewport>;
+  consumedTurnFileSelections: WeakSet<DiffPanelSelection>;
+  saveViewport: (scopeKey: string, viewport: DiffPanelViewport) => void;
   collapsedFileKeysByScopeKey: Record<string, ReadonlySet<string>>;
   updateCollapsedFileKeys: (
     scopeKey: string,
@@ -141,6 +146,13 @@ interface DiffPanelSessionStoreState {
 
 // Session-only so folds survive right-panel switches without changing reload defaults.
 export const useDiffPanelSessionStore = create<DiffPanelSessionStoreState>()((set) => ({
+  viewportByScopeKey: {},
+  consumedTurnFileSelections: new WeakSet(),
+  saveViewport: (scopeKey, viewport) => set((state) => {
+    // One snapshot per comparison, with a session-wide cap for long-running clients.
+    const entries = Object.entries(state.viewportByScopeKey).filter(([key]) => key !== scopeKey);
+    return { viewportByScopeKey: Object.fromEntries([...entries.slice(-99), [scopeKey, viewport]]) };
+  }),
   collapsedFileKeysByScopeKey: {},
   updateCollapsedFileKeys: (scopeKey, defaults, update) =>
     set((state) => {

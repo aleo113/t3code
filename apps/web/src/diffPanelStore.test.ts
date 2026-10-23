@@ -16,7 +16,21 @@ describe("diffPanelStore", () => {
       byThreadKey: {},
       branchBaseRefByThreadKey: {},
     });
-    useDiffPanelSessionStore.setState({ collapsedFileKeysByScopeKey: {} });
+    useDiffPanelSessionStore.setState({ collapsedFileKeysByScopeKey: {}, viewportByScopeKey: {}, consumedTurnFileSelections: new WeakSet() });
+  });
+
+  it("keeps one latest viewport per comparison and evicts older comparisons under session pressure", () => {
+    const { saveViewport } = useDiffPanelSessionStore.getState();
+    for (let scope = 0; scope < 100; scope++) {
+      saveViewport(String(scope), { scrollTop: scope, requestedFilePaths: [] });
+    }
+    saveViewport("0", { scrollTop: 700, requestedFilePaths: ["deep.txt"] });
+    saveViewport("new", { scrollTop: 900, requestedFilePaths: [] });
+    const snapshots = useDiffPanelSessionStore.getState().viewportByScopeKey;
+    expect(Object.keys(snapshots)).toHaveLength(100);
+    expect(snapshots["1"]).toBeUndefined();
+    expect(snapshots["0"]).toEqual({ scrollTop: 700, requestedFilePaths: ["deep.txt"] });
+    expect(snapshots["new"]?.scrollTop).toBe(900);
   });
 
   it("retains fold choices when a panel consumer returns with fresh defaults", () => {

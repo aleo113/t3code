@@ -6,7 +6,7 @@ import type {
   FileDiffMetadata,
   SelectedLineRange,
 } from "@pierre/diffs";
-import type { CodeViewHandle } from "@pierre/diffs/react";
+import type { CodeViewHandle, CodeViewProps } from "@pierre/diffs/react";
 import type { ReviewDiscussion, ReviewDiscussionAnchor, ScopedThreadRef } from "@t3tools/contracts";
 import { ReviewDiscussionMutationInput } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -103,6 +103,9 @@ interface AnnotatableCodeViewProps {
   comparison?: DiscussionComparison;
   discussionFileStates?: ReadonlyMap<string, { error: boolean }>;
   onLoadDiscussionFile?: (path: string) => void;
+  onNavigationStart?: () => void;
+  containerRef?: Ref<HTMLDivElement>;
+  onScroll?: CodeViewProps<DiffCommentAnnotationGroup, undefined>["onScroll"];
   onGoToDiscussion?: (fileKey: string, range: SelectedLineRange, discussionId: string) => void;
   composerDraftTarget: ScopedThreadRef | DraftId;
   options: StyledDiffCodeViewOptions<DiffCommentAnnotationGroup>;
@@ -147,6 +150,9 @@ function AnnotatableCodeViewContent({
   discussionFileStates,
   onLoadDiscussionFile,
   onGoToDiscussion,
+  onNavigationStart,
+  containerRef,
+  onScroll,
   discussionController,
   composerDraftTarget,
   options,
@@ -278,6 +284,7 @@ function AnnotatableCodeViewContent({
     onGoToDiscussion?.(file.fileKey, range, discussion.id);
   }, [activeNavigation, comparison, discussionController?.discussions, files, onGoToDiscussion]);
   const goToDiscussion = (discussion: ReviewDiscussion) => {
+    onNavigationStart?.();
     const path = discussion.anchor.newPath ?? discussion.anchor.oldPath;
     if (!path) return;
     setNavigation({ discussionId: discussion.id, path, scope: navigationScope });
@@ -480,6 +487,8 @@ function AnnotatableCodeViewContent({
       <StyledDiffCodeView<DiffCommentAnnotationGroup>
         key={codeViewKey}
         {...(viewerRef ? { viewerRef } : {})}
+        {...(containerRef ? { containerRef } : {})}
+        {...(onScroll ? { onScroll } : {})}
         {...(className ? { className } : {})}
         {...(unsafeCSSExtra ? { unsafeCSSExtra } : {})}
         {...(renderHeaderMetadata

@@ -126,6 +126,7 @@ export function useReviewFilePatches({
       return [
         file.path,
         {
+          pending: !patch || patch._tag === "Initial" || patch.waiting,
           error:
             patch?._tag === "Failure" ||
             (patch?._tag === "Success" &&
@@ -152,6 +153,11 @@ export function useReviewFilePatches({
     isPending: [...patches.values()].some((patch) => patch._tag === "Initial" || patch.waiting),
     retry,
     requestFile,
+    requestPaths: (paths: ReadonlyArray<string>) => requestFiles(
+      files.flatMap((file, index) => paths.includes(file.path) ? [index] : []),
+    ),
+    requestedFilePaths: (requested.scope === scope ? requested.indices : DEFAULT_INDICES)
+      .flatMap((index) => files[index] ? [files[index]!.path] : []),
     readyFilePaths,
     renderableFiles,
     settledFileCount,

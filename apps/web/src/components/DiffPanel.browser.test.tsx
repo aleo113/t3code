@@ -69,8 +69,8 @@ import { useCodeViewFileReveal } from "./diffs/useCodeViewFileReveal";
 import { useDiffDiscussionReplyStore } from "./diffs/diffDiscussionReplyStore";
 import { useDiffPanelStore, useDiffPanelSessionStore } from "../diffPanelStore";
 
-const threadRef = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("thread"));
-const thread = { ...threadRef, worktreePath: "/repo" };
+let threadRef = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("thread"));
+let thread = { ...threadRef, worktreePath: "/repo" };
 const turns = [1, 2].map((ordinal) => ({
   runId: RunId.make(`turn-${ordinal}`),
   checkpointTurnCount: ordinal,
@@ -103,8 +103,8 @@ const discussionsAtom = Atom.keepAlive(
 );
 const discussionPermissionAtom = Atom.keepAlive(Atom.make(false));
 const configAtom = Atom.make(null);
-const collapsedAtom = Atom.make(true);
-const checkpointAtom = Atom.make<string | null>(null);
+const collapsedAtom = Atom.keepAlive(Atom.make(true));
+const checkpointAtom = Atom.keepAlive(Atom.make<string | null>(null));
 let previewAtom = Atom.make(
   AsyncResult.success<ReviewDiffPreviewResult>({
     cwd: "/repo",
@@ -123,7 +123,7 @@ function loadedPatch(path: string): ReviewDiffPreviewSource {
 const patchAtoms = Atom.family((path: string) =>
   Atom.keepAlive(
     Atom.make<AsyncResult.AsyncResult<ReviewDiffPreviewSource>>(
-      path === "e.txt" ? AsyncResult.initial() : AsyncResult.success(loadedPatch(path)),
+      path === "e.txt" ? AsyncResult.initial() : AsyncResult.success(path.startsWith("file") ? deepPatch(path) : loadedPatch(path)),
     ),
   ),
 );
@@ -131,12 +131,16 @@ let registry: AtomRegistry.AtomRegistry;
 let container: HTMLDivElement;
 let root: Root;
 
+const defaultPreviewAtom = previewAtom;
 beforeEach(() => {
+  previewAtom = defaultPreviewAtom;
+  threadRef = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("thread"));
+  thread = { ...threadRef, worktreePath: "/repo" };
   useDiffDiscussionReplyStore.setState({ replies: {} });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   localStorage.setItem("t3code.diffFileTreeOpen", "true");
   useDiffPanelStore.setState({ byThreadKey: {}, branchBaseRefByThreadKey: {} });
-  useDiffPanelSessionStore.setState({ collapsedFileKeysByScopeKey: {} });
+  useDiffPanelSessionStore.setState({ collapsedFileKeysByScopeKey: {}, viewportByScopeKey: {}, consumedTurnFileSelections: new WeakSet() });
   mutateDiscussion.mockReset();
   mutateDiscussion.mockResolvedValue({ _tag: "Success" });
   registry = AtomRegistry.make();
@@ -862,5 +866,188 @@ it.each(["new", "old"] as const)(
         ),
       )
       .toBe(true);
+  },
+);
+
+
+function useLongPreview() {
+  const lines = Array.from({ length: 1200 }, (_, index) => `+viewport line ${index}`).join("\n");
+  const diff = `diff --git a/long.txt b/long.txt\n--- a/long.txt\n+++ b/long.txt\n@@ -1 +1,1200 @@\n-before\n${lines}\n`;
+  registry.set(collapsedAtom, false);
+  previewAtom = Atom.make(AsyncResult.success<ReviewDiffPreviewResult>({
+    cwd: "/repo",
+    generatedAt: DateTime.makeUnsafe("2026-10-16T00:00:00Z"),
+    sources: [
+      { ...source, diff, truncated: false },
+      { ...source, id: "working", kind: "working-tree", diff, truncated: false },
+    ],
+  }));
+  return diff;
+}
+
+async function scrollViewport(top: number) {
+  await expect.poll(() => viewport()).not.toBeNull();
+  await act(async () => {
+    viewport().scrollTop = top;
+    viewport().dispatchEvent(new Event("scroll"));
+    await new Promise(requestAnimationFrame);
+    await new Promise(requestAnimationFrame);
+  });
+  await expect.poll(() => viewport().scrollTop).toBeCloseTo(top, 0);
+}
+
+it("retains the viewport across panel unmount and thread A-B-A", async () => {
+  useLongPreview();
+  await render();
+  await scrollViewport(1800);
+  await act(async () => root.render(null));
+  await render();
+  await expect.poll(() => viewport().scrollTop).toBeCloseTo(1800, 0);
+  await act(async () => root.render(null));
+  const original = threadRef;
+  threadRef = scopeThreadRef(original.environmentId, ThreadId.make("other"));
+  thread = { ...threadRef, worktreePath: "/repo" };
+  await render();
+  await expect.poll(() => viewport().scrollTop).toBe(0);
+  await scrollViewport(900);
+  await act(async () => root.render(null));
+  threadRef = original;
+  thread = { ...threadRef, worktreePath: "/repo" };
+  await render();
+  await expect.poll(() => viewport().scrollTop).toBeCloseTo(1800, 0);
+});
+
+it.each(["environment", "cwd", "uncommitted", "base", "turn"] as const)(
+  "isolates viewport positions by %s and returns to Changes",
+  async (scope) => {
+    const diff = useLongPreview();
+    registry.set(checkpointAtom, diff);
+    await render();
+    await scrollViewport(1600);
+    const original = threadRef;
+    if (scope === "environment") {
+      threadRef = scopeThreadRef(EnvironmentId.make("other-environment"), original.threadId);
+      thread = { ...threadRef, worktreePath: "/repo" };
+    } else if (scope === "cwd") thread = { ...threadRef, worktreePath: "/other" };
+    else if (scope === "uncommitted") useDiffPanelStore.getState().selectGitScope(threadRef, "unstaged");
+    else if (scope === "base") useDiffPanelStore.getState().selectBranchBaseRef(threadRef, "release");
+    else useDiffPanelStore.getState().selectTurn(threadRef, turns[0]!.runId);
+    await render();
+    await expect.poll(() => viewport()?.scrollTop).toBe(0);
+    await scrollViewport(800);
+    threadRef = original;
+    thread = { ...threadRef, worktreePath: "/repo" };
+    useDiffPanelStore.getState().selectBranchBaseRef(threadRef, null);
+    await render();
+    await expect.poll(() => viewport()?.scrollTop).toBeCloseTo(1600, 0);
+  },
+);
+
+it("keeps the numeric position when a large scroll is followed immediately by unmount", async () => {
+  useLongPreview();
+  await render();
+  await scrollViewport(800);
+  await act(async () => {
+    viewport().scrollTop = 12000;
+    viewport().dispatchEvent(new Event("scroll"));
+    root.render(null);
+  });
+  await render();
+  await expect.poll(() => viewport()?.scrollTop).toBeCloseTo(12000, 0);
+});
+
+it("retains a consumed turn-file viewport but navigates on a new identical selection", async () => {
+  const diff = useLongPreview();
+  registry.set(checkpointAtom, diff);
+  await selectTurn("long.txt");
+  await render();
+  await scrollViewport(1800);
+  await act(async () => root.render(null));
+  await render();
+  await expect.poll(() => viewport()?.scrollTop).toBeCloseTo(1800, 0);
+  await act(async () => useDiffPanelStore.getState().selectGitScope(threadRef, "branch"));
+  await selectTurn("long.txt");
+  await expect.poll(() => viewport()?.scrollTop).toBe(0);
+});
+
+it("does not consume a turn-file request before its delayed patch survives remount", async () => {
+  const diff = useLongPreview();
+  await selectTurn("long.txt");
+  await render();
+  await act(async () => root.render(null));
+  registry.set(checkpointAtom, diff);
+  await render();
+  await expect.element(toggle("long.txt", true)).toBeInTheDocument();
+  await scrollViewport(1500);
+  await act(async () => root.render(null));
+  await render();
+  await expect.poll(() => viewport()?.scrollTop).toBeCloseTo(1500, 0);
+});
+
+const deepPaths = Array.from({ length: 9 }, (_, index) => `file${index + 1}.txt`);
+function deepPatch(path: string): ReviewDiffPreviewSource {
+  const lines = Array.from({ length: 100 }, (_, index) => `+${path} line ${index}`).join("\n");
+  return {
+    ...source,
+    diff: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1,100 @@\n-before\n${lines}\n`,
+    files: [{ path, previousPath: null, additions: 100, deletions: 1 }],
+    truncated: false,
+  };
+}
+async function saveDeepViewport() {
+  registry.set(collapsedAtom, false);
+  previewAtom = Atom.make(AsyncResult.success<ReviewDiffPreviewResult>({
+    cwd: "/repo",
+    generatedAt: DateTime.makeUnsafe("2026-10-16T00:00:00Z"),
+    sources: [{ ...source, files: deepPaths.map((path) => ({ path, previousPath: null, additions: 100, deletions: 1 })) }],
+  }));
+  for (const path of deepPaths) registry.set(patchAtoms(path), AsyncResult.success(deepPatch(path)));
+  await render();
+  await expect.element(toggle(deepPaths[0]!, true)).toBeInTheDocument();
+  for (const path of deepPaths.slice(4)) {
+    await selectTreeFile(path);
+    await expect.element(toggle(path, true)).toBeInTheDocument();
+  }
+  await selectTreeFile("file9.txt");
+  await expectRevealed("file9.txt");
+  const top = viewport().scrollTop + 400;
+  await scrollViewport(top);
+  await act(async () => root.render(null));
+  registry.set(patchAtoms("file6.txt"), AsyncResult.initial());
+  return top;
+}
+
+it("reseeds deep file paths and waits for a delayed expanded predecessor before restoring", async () => {
+  const top = await saveDeepViewport();
+  await render();
+  await expect.poll(() => viewport()?.scrollTop).toBe(0);
+  // Keep the necessary patch pending beyond the geometry retry budget.
+  await act(async () => {
+    for (let frame = 0; frame < 125; frame++) await new Promise(requestAnimationFrame);
+  });
+  expect(viewport().scrollTop).toBe(0);
+  await act(async () => registry.set(patchAtoms("file6.txt"), AsyncResult.success(deepPatch("file6.txt"))));
+  await expect.poll(() => viewport()?.scrollTop, { timeout: 3000 }).toBeCloseTo(top, 0);
+});
+
+it.each(["wheel", "tree", "collapse", "failure"] as const)(
+  "%s terminates passive restoration while a deep predecessor is pending",
+  async (action) => {
+    await saveDeepViewport();
+    await render();
+    await expect.element(toggle("file1.txt", true)).toBeInTheDocument();
+    if (action === "wheel") {
+      viewport().dispatchEvent(new WheelEvent("wheel", { deltaY: 200 }));
+      await scrollViewport(200);
+    } else if (action === "tree") await selectTreeFile("file1.txt");
+    else if (action === "collapse") await page.getByRole("button", { name: "Collapse all files", exact: true }).click();
+    else await act(async () => registry.set(patchAtoms("file6.txt"), AsyncResult.success({ ...deepPatch("file6.txt"), diff: "" })));
+    const top = viewport().scrollTop;
+    await act(async () => registry.set(patchAtoms("file6.txt"), AsyncResult.success(deepPatch("file6.txt"))));
+    await expect.element(toggle("file6.txt", action !== "collapse")).toBeInTheDocument();
+    await act(async () => {
+      for (let frame = 0; frame < 8; frame++) await new Promise(requestAnimationFrame);
+    });
+    expect(viewport().scrollTop).toBeCloseTo(top, 0);
   },
 );
