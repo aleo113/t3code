@@ -309,3 +309,9 @@ describe("OrchestrationMessageContext", () => {
     expect(command.type === "message.dispatch" && command.context?.records[0]?.kind).toBe("image");
   });
 });
+
+it("preserves optional discussion identity on review cards and bounds it", () => {
+  const record = { ...knownRecords["review-comment"], discussionId: "discussion-42" };
+  expect(decodeRecord(record)).toEqual(Option.some(record));
+  expect(decodeRecord({ ...record, discussionId: "x".repeat(1025) })).toEqual(Option.none());
+});

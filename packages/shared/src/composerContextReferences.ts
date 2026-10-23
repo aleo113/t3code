@@ -254,6 +254,12 @@ function formatComposerContextProviderPayload(record: KnownComposerContextRecord
         `range: ${record.rangeLabel} (${record.startIndex}-${record.endIndex})`,
         `section: ${record.sectionTitle}`,
       ];
+      if (record.discussionId !== undefined) {
+        lines.push(
+          `discussionId: ${record.discussionId}`,
+          "You may respond inline, in chat, or both. To reply inline, use diff_discussion_reply with this discussionId. Read the full saved anchor and history with diff_discussions_read.",
+        );
+      }
       if (record.text.trim()) lines.push("comment:", indent(record.text.trim()));
       if (record.diff.trim()) {
         lines.push(`${record.fenceLanguage ?? "diff"}:`, indent(record.diff.trimEnd()));

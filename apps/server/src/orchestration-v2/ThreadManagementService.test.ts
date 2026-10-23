@@ -1,6 +1,8 @@
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
+  ComposerContextId,
+  type OrchestrationMessageContext,
   MessageId,
   NodeId,
   type OrchestrationV2Command,
@@ -37,6 +39,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { liveThreadShell, idleThreadProjection } from "../mcp/McpToolAccess.testkit.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, type DispatchModeRefusal } from "./DispatchModeLimit.ts";
@@ -1076,4 +1079,78 @@ it.effect.each([
 
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),
+);
+
+it.effect.each([true, false])(
+  "sendToThread preserves optional structured context: %s",
+  (withContext) => {
+    const threadId = ThreadId.make("thread:context-forwarding");
+    const shell = liveThreadShell(threadId, { activeRunId: null });
+    const projection = idleThreadProjection(shell);
+    const context: OrchestrationMessageContext = {
+      version: 1,
+      records: [
+        {
+          version: 1,
+          kind: "review-comment",
+          contextId: ComposerContextId.make("review-comment_post"),
+          label: "a.ts new L2",
+          discussionId: "discussion",
+          sectionId: "working-tree",
+          sectionTitle: "Uncommitted",
+          filePath: "a.ts",
+          startIndex: 2,
+          endIndex: 2,
+          rangeLabel: "new L2",
+          text: "",
+          diff: "const value = 1;",
+        },
+      ],
+    };
+    const dispatched: unknown[] = [];
+    const dispatchError = new Orchestrator.OrchestratorProjectionError({
+      threadId,
+      cause: "test stops after dispatch",
+    });
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadRecords: () => Effect.succeed(projection),
+          dispatch: (command) =>
+            Effect.sync(() => dispatched.push(command)).pipe(
+              Effect.andThen(Effect.fail(dispatchError)),
+            ),
+        }),
+      ),
+      Layer.provide(ServerSettings.layerTest({})),
+      Layer.provide(layerReceiptsTest),
+    );
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const error = yield* threads
+        .sendToThread({
+          threadId,
+          projectId: shell.projectId,
+          commandId: CommandId.make("command:context-forwarding"),
+          messageId: MessageId.make("message:context-forwarding"),
+          text: "Explain this",
+          attachments: [],
+          mode: "auto",
+          createdBy: "user",
+          creationSource: "web",
+          ...(withContext ? { context } : {}),
+        })
+        .pipe(Effect.flip);
+      expect(error).toBe(dispatchError);
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({
+        type: "message.dispatch",
+        text: "Explain this",
+        dispatchMode: { type: "start_immediately" },
+      });
+      if (withContext) expect(dispatched[0]).toHaveProperty("context", context);
+      else expect(dispatched[0]).not.toHaveProperty("context");
+    }).pipe(Effect.provide(layerTest));
+  },
 );

@@ -149,6 +149,13 @@ import {
   ReviewDiffPreviewInput,
   ReviewDiffPreviewResult,
 } from "./review.ts";
+import {
+  ReviewDiscussionError,
+  ReviewDiscussionListInput,
+  ReviewDiscussionListResult,
+  ReviewDiscussionMutationInput,
+  ReviewDiscussionMutationResult,
+} from "./reviewDiscussions.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
   OrchestrationSearchThreadsError,
@@ -437,6 +444,8 @@ export const WS_METHODS = {
   gitResolvePullRequest: "git.resolvePullRequest",
   gitPreparePullRequestThread: "git.preparePullRequestThread",
 
+  reviewListDiscussions: "review.listDiscussions",
+  reviewMutateDiscussion: "review.mutateDiscussion",
   reviewGetDiffPreview: "review.getDiffPreview",
   reviewGetDiffFileContents: "review.getDiffFileContents",
 
@@ -1432,6 +1441,17 @@ const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
   error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
 });
 
+const WsReviewListDiscussionsRpc = Rpc.make(WS_METHODS.reviewListDiscussions, {
+  payload: ReviewDiscussionListInput,
+  success: ReviewDiscussionListResult,
+  error: Schema.Union([ReviewDiscussionError, EnvironmentAuthorizationError]),
+});
+const WsReviewMutateDiscussionRpc = Rpc.make(WS_METHODS.reviewMutateDiscussion, {
+  payload: ReviewDiscussionMutationInput,
+  success: ReviewDiscussionMutationResult,
+  error: Schema.Union([ReviewDiscussionError, EnvironmentAuthorizationError]),
+});
+
 const WsReviewGetDiffPreviewRpc = Rpc.make(WS_METHODS.reviewGetDiffPreview, {
   payload: ReviewDiffPreviewInput,
   success: ReviewDiffPreviewResult,
@@ -2023,6 +2043,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsCreateRefRpc,
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,
+  WsReviewListDiscussionsRpc,
+  WsReviewMutateDiscussionRpc,
   WsReviewGetDiffPreviewRpc,
   WsReviewGetDiffFileContentsRpc,
   WsTerminalOpenRpc,

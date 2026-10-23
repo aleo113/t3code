@@ -55,6 +55,7 @@ import { formatShortTimestamp } from "../timestampFormat";
 import { DiffFilePathCopyButton } from "./DiffFilePathCopyButton";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffStatLabel } from "./chat/DiffStatLabel";
+import { EmptyDiffDiscussionHistory } from "./diffs/DiffDiscussionHistory";
 import { AnnotatableCodeView, type AnnotatableCodeViewHandle } from "./diffs/AnnotatableCodeView";
 import { DiffFileTree } from "./diffs/DiffFileTree";
 import { diffFileTreeEntries } from "./diffs/diffFileTree.logic";
@@ -546,7 +547,13 @@ export default function DiffPanel({
   const allDiffFilesCollapsed = areAllDiffFilesCollapsed(diffFileKeys, collapsedDiffFileKeys);
   const diffLineStat = sourceLineStat ?? getDiffLineStat(renderableFiles);
   const fileTreeEntries = diffFileTreeEntries(renderableFiles);
-  const treeRevealScope = { collapseScopeKey, diffSelection };
+  const treeRevealScope = JSON.stringify([
+    codeViewMountKey,
+    collapseScopeKey,
+    diffSelection,
+    filePatchScope,
+    selectedGitSource?.diffHash,
+  ]);
   const requestTreeReveal = useCodeViewFileReveal(codeView, treeRevealScope, codeViewFileKeys);
   const revealDiffFile = (filePath: string) => {
     const index = renderableFileEntries.findIndex(
@@ -1018,12 +1025,17 @@ export default function DiffPanel({
                   }
                 />
               ) : (
-                <div className="flex h-full items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
-                  <p>
-                    {hasNoNetChanges
-                      ? "No net changes in this selection."
-                      : "No patch available for this selection."}
-                  </p>
+                <div className="flex h-full min-h-0 flex-col">
+                  {!selectedTurn && typeof composerDraftTarget !== "string" ? (
+                    <EmptyDiffDiscussionHistory thread={composerDraftTarget} />
+                  ) : null}
+                  <div className="flex flex-1 items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
+                    <p>
+                      {hasNoNetChanges
+                        ? "No net changes in this selection."
+                        : "No patch available for this selection."}
+                    </p>
+                  </div>
                 </div>
               )
             ) : lazySource || renderablePatch?.kind === "files" ? (
@@ -1087,9 +1099,35 @@ export default function DiffPanel({
                     className="h-full min-h-0 overflow-auto"
                     files={codeViewFiles}
                     pendingFiles={pendingFiles}
+                    discussionFileStates={fileStates}
+                    onLoadDiscussionFile={(path) => {
+                      const index = renderableFileEntries.findIndex(
+                        (entry) => resolveFileDiffPath(entry.fileDiff) === path,
+                      );
+                      if (index < 0) return;
+                      if (fileStates.get(path)?.error) retry(path);
+                      else requestFile(index);
+                    }}
+                    onGoToDiscussion={(fileKey, range, discussionId) => {
+                      const file = codeViewFiles.find((entry) => entry.fileKey === fileKey);
+                      if (!file) return;
+                      unfoldDiffFile(fileKey);
+                      requestTreeReveal(fileKey, { range, discussionId, fileDiff: file.fileDiff });
+                    }}
                     renderCodeViewFooter={renderLoadingBoundary}
                     sectionId={reviewSectionId}
                     sectionTitle={reviewSectionTitle}
+                    {...(selectedGitSource && !selectedTurn
+                      ? {
+                          comparison: {
+                            sourceId: selectedGitSource.id,
+                            sourceKind: selectedGitSource.kind,
+                            diffHash: selectedGitSource.diffHash,
+                            baseRef: selectedGitSource.baseRef,
+                            headRef: selectedGitSource.headRef,
+                          },
+                        }
+                      : {})}
                     composerDraftTarget={composerDraftTarget}
                     renderHeaderFilenameSuffix={(fileDiff) => {
                       const path = resolveFileDiffPath(fileDiff);

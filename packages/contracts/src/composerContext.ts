@@ -177,6 +177,7 @@ export type PreviewAnnotationContextRecord = typeof PreviewAnnotationContextReco
 export const ReviewCommentContextRecord = Schema.Struct({
   ...recordBase,
   kind: Schema.Literal("review-comment"),
+  discussionId: Schema.optionalKey(Schema.NonEmptyString.check(Schema.isMaxLength(1024))),
   sectionId: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
   sectionTitle: ShortString,
   filePath: TrimmedNonEmptyString.check(Schema.isMaxLength(2_048)),

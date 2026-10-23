@@ -10,6 +10,24 @@ rebases, the files Git brought in are left out. A file stays in the list when th
 committed it, or fixed a conflict in it. Use the branch comparison to review everything that changed
 against your base branch. Restore still returns the complete saved workspace.
 
+## Discuss local changes
+
+In an existing thread's uncommitted or branch diff, select changed lines and ask
+the agent a question from the inline comment editor. Posting sends it to the
+thread immediately and steers an active turn. The agent can answer beside the
+code, in chat, or both. **Add to chat** keeps the existing workflow of collecting
+comments in the composer before sending them.
+
+Ask the agent for an annotated review to have it explain selected changes beside
+the code. Discussions are saved locally with the thread; they do not add source
+comments or publish anything to a Git host. Resolve collapses a discussion, while
+hiding removes it from the diff without deleting its history. If the code changes,
+the original excerpt remains available with the outdated discussion.
+
+Open **Discussions** in the diff to find active, resolved, hidden, and outdated
+conversations by file and line. Jump to a current discussion to reveal its file
+and inline thread; outdated selections retain their saved context for reference.
+
 ## Connect an account
 
 Install Git and configure authentication on the machine running your T3 Code server. For a remote

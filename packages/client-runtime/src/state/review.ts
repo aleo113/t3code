@@ -21,7 +21,28 @@ export function createReviewEnvironmentAtoms<R, E>(
 ) {
   const patchReads = Semaphore.makeUnsafe(4);
   const diffFileScheduler = createAtomCommandScheduler();
+  const discussions = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:review:discussions",
+    tag: WS_METHODS.reviewListDiscussions,
+    staleTimeMs: 0,
+    refreshIntervalMs: 3_000,
+    idleTtlMs: 0,
+  });
   return {
+    discussions,
+    mutateDiscussion: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:review:mutate-discussion",
+      tag: WS_METHODS.reviewMutateDiscussion,
+      onSuccess: ({ environmentId, input }, registry) =>
+        Effect.sync(() => {
+          registry.refresh(
+            discussions({
+              environmentId,
+              input: { threadId: input.threadId, includeHidden: true },
+            }),
+          );
+        }),
+    }),
     diffPreview: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:review:diff-preview",
       tag: WS_METHODS.reviewGetDiffPreview,

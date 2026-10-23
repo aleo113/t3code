@@ -6,13 +6,16 @@ import {
   EnvironmentId,
   RunId,
   ThreadId,
+  type ReviewDiscussion,
+  type ReviewDiscussionMutationInput,
   type ReviewDiffPreviewResult,
   type ReviewDiffPreviewSource,
 } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
-import { act } from "react";
+import { act, useState } from "react";
+import { parseDiffFromFile, type FileDiffMetadata } from "@pierre/diffs";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -32,11 +35,14 @@ vi.mock("../state/vcs", () => ({ vcsEnvironment: { status: () => null, listRefs:
 vi.mock("../state/review", () => ({
   reviewEnvironment: {
     diffPreview: () => previewAtom,
+    discussions: () => discussionsAtom,
+    mutateDiscussion: { permissionAtom: () => discussionPermissionAtom },
     diffFilePatch: ({ input }: { input: { request: { file: { path: string } } } }) =>
       patchAtoms(input.request.file.path),
   },
 }));
-vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
+const mutateDiscussion = vi.hoisted(() => vi.fn());
+vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => mutateDiscussion }));
 vi.mock("../hooks/useSettings", () => ({
   useClientSettings: () => ({
     ...DEFAULT_CLIENT_SETTINGS,
@@ -58,7 +64,10 @@ vi.mock("../lib/checkpointDiffState", () => ({
 }));
 
 import DiffPanel from "./DiffPanel";
-import { useDiffPanelStore } from "../diffPanelStore";
+import { AnnotatableCodeView, type AnnotatableCodeViewHandle } from "./diffs/AnnotatableCodeView";
+import { useCodeViewFileReveal } from "./diffs/useCodeViewFileReveal";
+import { useDiffDiscussionReplyStore } from "./diffs/diffDiscussionReplyStore";
+import { useDiffPanelStore, useDiffPanelSessionStore } from "../diffPanelStore";
 
 const threadRef = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("thread"));
 const thread = { ...threadRef, worktreePath: "/repo" };
@@ -89,6 +98,10 @@ const source: ReviewDiffPreviewSource = {
     deletions: 1,
   })),
 };
+const discussionsAtom = Atom.keepAlive(
+  Atom.make(AsyncResult.success<{ discussions: readonly ReviewDiscussion[] }>({ discussions: [] })),
+);
+const discussionPermissionAtom = Atom.keepAlive(Atom.make(false));
 const configAtom = Atom.make(null);
 const collapsedAtom = Atom.make(true);
 const checkpointAtom = Atom.make<string | null>(null);
@@ -108,8 +121,10 @@ function loadedPatch(path: string): ReviewDiffPreviewSource {
   };
 }
 const patchAtoms = Atom.family((path: string) =>
-  Atom.make<AsyncResult.AsyncResult<ReviewDiffPreviewSource>>(
-    path === "e.txt" ? AsyncResult.initial() : AsyncResult.success(loadedPatch(path)),
+  Atom.keepAlive(
+    Atom.make<AsyncResult.AsyncResult<ReviewDiffPreviewSource>>(
+      path === "e.txt" ? AsyncResult.initial() : AsyncResult.success(loadedPatch(path)),
+    ),
   ),
 );
 let registry: AtomRegistry.AtomRegistry;
@@ -117,9 +132,13 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  useDiffDiscussionReplyStore.setState({ replies: {} });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   localStorage.setItem("t3code.diffFileTreeOpen", "true");
   useDiffPanelStore.setState({ byThreadKey: {}, branchBaseRefByThreadKey: {} });
+  useDiffPanelSessionStore.setState({ collapsedFileKeysByScopeKey: {} });
+  mutateDiscussion.mockReset();
+  mutateDiscussion.mockResolvedValue({ _tag: "Success" });
   registry = AtomRegistry.make();
   container = document.createElement("div");
   container.style.cssText = "width: 1000px; height: 300px";
@@ -232,3 +251,451 @@ it("waits for a lazy Git patch while preserving sibling choices and expanded def
   await act(async () => useDiffPanelStore.getState().selectGitScope(threadRef, "unstaged"));
   await expect.element(toggle("b.txt", true)).toBeInTheDocument();
 });
+
+function discussion(id: string, changes: Partial<ReviewDiscussion> = {}): ReviewDiscussion {
+  return {
+    id,
+    threadId: threadRef.threadId,
+    hidden: false,
+    resolved: false,
+    createdAt: "now",
+    updatedAt: "now",
+    anchor: {
+      sourceId: source.id,
+      sourceKind: source.kind,
+      diffHash: source.diffHash,
+      baseRef: source.baseRef,
+      headRef: source.headRef,
+      oldPath: "e.txt",
+      newPath: "e.txt",
+      side: "new",
+      startLine: 30,
+      endLine: 30,
+      excerpt: "after 29",
+    },
+    messages: [
+      {
+        id: `${id}-message`,
+        author: "assistant",
+        text: `Question ${id}`,
+        createdAt: "now",
+        delivery: "none",
+        deliveryError: null,
+      },
+    ],
+    ...changes,
+  };
+}
+async function publishDiscussions(discussions: readonly ReviewDiscussion[]) {
+  await act(async () => registry.set(discussionsAtom, AsyncResult.success({ discussions })));
+}
+function discussionRow(id: string) {
+  return page.elementLocator(
+    container.querySelector<HTMLElement>(`[data-discussion-row="${id}"]`)!,
+  );
+}
+async function expectDiscussionFocused(id: string) {
+  await expect.poll(() => document.activeElement?.getAttribute("data-diff-discussion")).toBe(id);
+  await expect
+    .poll(() => {
+      const rect = document.activeElement!.getBoundingClientRect();
+      const bounds = viewport().getBoundingClientRect();
+      return rect.top < bounds.bottom && rect.bottom > bounds.top && viewport().scrollTop > 0;
+    })
+    .toBe(true);
+}
+
+it("lists unvalidated discussions, loads a provisional added-file key, and focuses the exact same-line thread", async () => {
+  container.style.height = "650px";
+  const first = discussion("first");
+  const second = discussion("second", { resolved: true });
+  await publishDiscussions([first, second]);
+  await render();
+  await page.getByText("Discussions (2)", { exact: true }).click();
+  await expect.poll(() => discussionRow("second").element().textContent).toContain("Not validated");
+  await expect.poll(() => discussionRow("second").element().textContent).not.toContain("Outdated");
+  await discussionRow("second").getByRole("button", { name: "Load and go", exact: true }).click();
+  await expect.poll(() => discussionRow("second").element().textContent).toContain("Loading patch");
+  expect(document.activeElement?.getAttribute("data-diff-discussion")).toBeNull();
+  const added = {
+    ...loadedPatch("e.txt"),
+    diff: filePatch("e.txt")
+      .replace("--- a/e.txt", "--- /dev/null")
+      .replace("@@ -1 +1,30 @@\n-before", "@@ -0,0 +1,30 @@"),
+  };
+  // Replacing the selection object with the same comparison while unfolding
+  // must not cancel the first queued jump (e.g. a reconciled store snapshot).
+  const stopReplacingSelection = useDiffPanelSessionStore.subscribe(() =>
+    useDiffPanelStore.getState().selectGitScope(threadRef, "branch"),
+  );
+  await act(async () => registry.set(patchAtoms("e.txt"), AsyncResult.success(added)));
+  stopReplacingSelection();
+  await expectDiscussionFocused("second");
+  await expect
+    .poll(() => discussionRow("second").element().textContent)
+    .toContain("Resolved · Current");
+  expect(container.querySelector("details textarea")).toBeNull();
+  expect(mutateDiscussion).not.toHaveBeenCalled();
+  await discussionRow("first")
+    .getByRole("button", { name: "Go to discussion", exact: true })
+    .click();
+  await expectDiscussionFocused("first");
+  await scrollToStart();
+  await expect.element(toggle("a.txt", false)).toBeInTheDocument();
+});
+
+it("waits for a confirmed Show poll before navigating and does not reopen a resolved discussion", async () => {
+  container.style.height = "650px";
+  registry.set(discussionPermissionAtom, true);
+  const hidden = discussion("hidden", { hidden: true, resolved: true });
+  await publishDiscussions([hidden]);
+  await render();
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  // The fifth lazy file still needs to be requested before it can be validated.
+  await discussionRow("hidden").getByText("Saved discussion", { exact: true }).click();
+  await discussionRow("hidden").getByRole("button", { name: "Show and go", exact: true }).click();
+  await expect.poll(() => mutateDiscussion.mock.calls.length).toBe(1);
+  expect(mutateDiscussion.mock.calls[0]![0].input).toEqual({
+    type: "status",
+    threadId: threadRef.threadId,
+    discussionId: hidden.id,
+    hidden: false,
+  } satisfies ReviewDiscussionMutationInput);
+  await expect
+    .poll(() => discussionRow("hidden").element().textContent)
+    .toContain("Waiting for Show confirmation");
+  expect(container.querySelector(".diff-render-surface [data-diff-discussion]")).toBeNull();
+  await act(async () =>
+    registry.set(patchAtoms("e.txt"), AsyncResult.success(loadedPatch("e.txt"))),
+  );
+  await publishDiscussions([{ ...hidden, hidden: false }]);
+  await expectDiscussionFocused("hidden");
+  await expect
+    .element(page.getByRole("button", { name: "Reopen", exact: true }))
+    .toBeInTheDocument();
+  expect(container.querySelector("details textarea")).toBeNull();
+});
+
+it("cancels queued navigation on comparison switch and keeps mismatched loaded excerpts outdated", async () => {
+  container.style.height = "650px";
+  await publishDiscussions([discussion("queued")]);
+  await render();
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await discussionRow("queued").getByRole("button", { name: "Load and go", exact: true }).click();
+  await act(async () => useDiffPanelStore.getState().selectGitScope(threadRef, "unstaged"));
+  await act(async () =>
+    registry.set(patchAtoms("e.txt"), AsyncResult.success(loadedPatch("e.txt"))),
+  );
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await expect
+    .element(discussionRow("queued").getByRole("button", { name: "Load and go", exact: true }))
+    .toBeInTheDocument();
+  expect(document.activeElement?.getAttribute("data-diff-discussion")).toBeNull();
+  const changed = {
+    ...loadedPatch("e.txt"),
+    diff: filePatch("e.txt").replace("+after 29", "+different content"),
+  };
+  await act(async () => registry.set(patchAtoms("e.txt"), AsyncResult.success(changed)));
+  await expect.poll(() => discussionRow("queued").element().textContent).toContain("Outdated");
+  await expect
+    .element(discussionRow("queued").getByRole("button", { name: "Go to discussion", exact: true }))
+    .not.toBeInTheDocument();
+  expect(document.activeElement?.getAttribute("data-diff-discussion")).toBeNull();
+});
+
+it("offers explicit retry for a patch load failure without calling the discussion outdated", async () => {
+  container.style.height = "650px";
+  await render();
+  await publishDiscussions([discussion("retry")]);
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await discussionRow("retry").getByRole("button", { name: "Load and go", exact: true }).click();
+  await act(async () =>
+    registry.set(patchAtoms("e.txt"), AsyncResult.success({ ...loadedPatch("e.txt"), diff: "" })),
+  );
+  await expect
+    .poll(() => discussionRow("retry").element().textContent)
+    .toContain("Patch could not load");
+  await expect.poll(() => discussionRow("retry").element().textContent).not.toContain("Outdated");
+  const refresh = vi.spyOn(registry, "refresh");
+  await discussionRow("retry")
+    .getByRole("button", { name: "Retry load and go", exact: true })
+    .click();
+  expect(refresh).toHaveBeenCalled();
+  refresh.mockRestore();
+  await act(async () =>
+    registry.set(patchAtoms("e.txt"), AsyncResult.success(loadedPatch("e.txt"))),
+  );
+  await expectDiscussionFocused("retry");
+});
+
+async function openReplyDiscussion() {
+  container.style.height = "650px";
+  registry.set(discussionPermissionAtom, true);
+  const entry = discussion("reply-owner");
+  await publishDiscussions([entry]);
+  await render();
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await discussionRow(entry.id)
+    .getByRole("button", { name: /^(Load and go|Go to discussion)$/ })
+    .click();
+  await act(async () =>
+    registry.set(patchAtoms("e.txt"), AsyncResult.success(loadedPatch("e.txt"))),
+  );
+  await expectDiscussionFocused(entry.id);
+  return entry;
+}
+
+const replyEditor = () => page.getByRole("textbox", { name: "Comment on lines 30–30" });
+
+async function remountReplyPanel() {
+  await act(async () => root.render(null));
+  expect(container.querySelector("[data-diff-discussion]")).toBeNull();
+  await render();
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await discussionRow("reply-owner")
+    .getByRole("button", { name: /^(Load and go|Go to discussion)$/ })
+    .click();
+  await act(async () =>
+    registry.set(patchAtoms("e.txt"), AsyncResult.success(loadedPatch("e.txt"))),
+  );
+  await expectDiscussionFocused("reply-owner");
+}
+
+it("retains an unsent discussion reply when the real viewer unmounts and remounts", async () => {
+  await openReplyDiscussion();
+  await replyEditor().fill("Keep this unsent reply");
+  const previousEditor = replyEditor().element();
+  await remountReplyPanel();
+  expect(previousEditor.isConnected).toBe(false);
+  await expect.element(replyEditor()).toHaveValue("Keep this unsent reply");
+  expect(mutateDiscussion).not.toHaveBeenCalled();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await remountReplyPanel();
+  await expect.element(replyEditor()).toHaveValue("");
+});
+
+it("retains a draft through Pierre portal virtualization and reconciles an offscreen reply", async () => {
+  const entry = await openReplyDiscussion();
+  const lines = Array.from({ length: 2000 }, (_, index) => `+after ${index}`).join("\n");
+  await scrollToStart();
+  await toggle("a.txt", false).click();
+  await act(async () =>
+    registry.set(
+      patchAtoms("a.txt"),
+      AsyncResult.success({
+        ...loadedPatch("a.txt"),
+        diff: `diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2000 @@\n-before\n${lines}\n`,
+      }),
+    ),
+  );
+  await discussionRow(entry.id)
+    .getByRole("button", { name: "Go to discussion", exact: true })
+    .click();
+  await expectDiscussionFocused(entry.id);
+  const editor = replyEditor();
+  await editor.fill("Keep the offscreen draft");
+  const original = editor.element();
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await scrollToStart();
+  await expect.poll(() => original.isConnected).toBe(false);
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await discussionRow(entry.id)
+    .getByRole("button", { name: "Go to discussion", exact: true })
+    .click();
+  await expectDiscussionFocused(entry.id);
+  await expect.element(editor).toHaveValue("Keep the offscreen draft");
+  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect.poll(() => mutateDiscussion.mock.calls.length).toBe(1);
+  const attempted = mutateDiscussion.mock.calls[0]![0].input;
+  const submitted = editor.element();
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await scrollToStart();
+  await expect.poll(() => submitted.isConnected).toBe(false);
+  await publishDiscussions([
+    {
+      ...entry,
+      messages: [
+        ...entry.messages,
+        {
+          id: attempted.messageId,
+          text: attempted.text,
+          author: "user",
+          createdAt: "now",
+          delivery: "sent",
+          deliveryError: null,
+        },
+      ],
+    },
+  ]);
+  await page.getByText("Discussions (1)", { exact: true }).click();
+  await discussionRow(entry.id)
+    .getByRole("button", { name: "Go to discussion", exact: true })
+    .click();
+  await expectDiscussionFocused(entry.id);
+  await expect.element(editor).toHaveValue("");
+  await expect.element(editor).not.toHaveAttribute("readonly");
+});
+
+it.each(["remounted viewer", "outdated history"] as const)(
+  "retains an in-flight and lost-response reply envelope in the %s",
+  async (destination) => {
+    const entry = await openReplyDiscussion();
+    let loseResponse!: () => void;
+    mutateDiscussion.mockReturnValueOnce(
+      new Promise<{ _tag: "Failure" }>((resolve) => {
+        loseResponse = () => resolve({ _tag: "Failure" });
+      }),
+    );
+    await replyEditor().fill("One uncertain post");
+    await page.getByRole("button", { name: "Reply", exact: true }).click();
+    await expect.poll(() => mutateDiscussion.mock.calls.length).toBe(1);
+    const attempted = mutateDiscussion.mock.calls[0]![0];
+    const previousEditor = replyEditor().element();
+    if (destination === "remounted viewer") {
+      await remountReplyPanel();
+    } else {
+      await act(async () =>
+        registry.set(
+          patchAtoms("e.txt"),
+          AsyncResult.success({
+            ...loadedPatch("e.txt"),
+            diff: filePatch("e.txt").replace("+after 29", "+changed target"),
+          }),
+        ),
+      );
+      await expect.poll(() => discussionRow(entry.id).element().textContent).toContain("Outdated");
+      await discussionRow(entry.id).getByText("Saved discussion", { exact: true }).click();
+    }
+    expect(previousEditor.isConnected).toBe(false);
+    await expect.element(replyEditor()).toHaveValue("One uncertain post");
+    await expect.element(replyEditor()).toHaveAttribute("readonly");
+    await expect
+      .element(page.getByRole("button", { name: "Retry post", exact: true }))
+      .toBeDisabled();
+    await act(async () => loseResponse());
+    if (destination === "remounted viewer") await remountReplyPanel();
+    await expect
+      .element(page.getByRole("button", { name: "Retry post", exact: true }))
+      .toBeEnabled();
+    await expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+    await expect.element(page.getByRole("button", { name: "Resolve", exact: true })).toBeDisabled();
+    await expect
+      .element(page.getByRole("button", { name: "Hide discussion", exact: true }))
+      .toBeDisabled();
+    await act(async () => registry.set(discussionPermissionAtom, false));
+    await expect
+      .element(page.getByRole("button", { name: "Retry post", exact: true }))
+      .toBeDisabled();
+    await act(async () => registry.set(discussionPermissionAtom, true));
+    await page.getByRole("button", { name: "Retry post", exact: true }).click();
+    await expect.poll(() => mutateDiscussion.mock.calls.length).toBe(2);
+    expect(mutateDiscussion.mock.calls[1]![0]).toEqual(attempted);
+    // A successful response still needs saved-ID confirmation from the poll.
+    await expect.element(replyEditor()).toHaveAttribute("readonly");
+    await publishDiscussions([
+      {
+        ...entry,
+        messages: [
+          ...entry.messages,
+          {
+            id: attempted.input.messageId,
+            text: attempted.input.text,
+            author: "user",
+            createdAt: "now",
+            delivery: "sent",
+            deliveryError: null,
+          },
+        ],
+      },
+    ]);
+    await expect.element(replyEditor()).toHaveValue("");
+    await expect.element(replyEditor()).not.toHaveAttribute("readonly");
+    await replyEditor().fill("A distinct follow-up");
+    await page.getByRole("button", { name: "Reply", exact: true }).click();
+    await expect.poll(() => mutateDiscussion.mock.calls.length).toBe(3);
+    expect(mutateDiscussion.mock.calls[2]![0].input.messageId).not.toBe(attempted.input.messageId);
+    expect(mutateDiscussion.mock.calls[2]![0].input.text).toBe("A distinct follow-up");
+  },
+);
+
+function ContextDiscussionView({ fileDiff }: { fileDiff: FileDiffMetadata }) {
+  const [viewer, setViewer] = useState<AnnotatableCodeViewHandle | null>(null);
+  const [collapsed, setCollapsed] = useState(true);
+  const requestReveal = useCodeViewFileReveal(viewer, "context", ["context"]);
+  return (
+    <AnnotatableCodeView
+      viewerRef={setViewer}
+      codeViewKey="context"
+      className="h-full min-h-0 overflow-auto"
+      files={[{ fileDiff, filePath: "context.txt", fileKey: "context", fileVersion: 1, collapsed }]}
+      pendingFiles={[]}
+      sectionId="branch"
+      sectionTitle="Changes"
+      composerDraftTarget={threadRef}
+      comparison={{
+        sourceId: source.id,
+        sourceKind: source.kind,
+        diffHash: source.diffHash,
+        baseRef: source.baseRef,
+        headRef: source.headRef,
+      }}
+      onGoToDiscussion={(fileKey, range, discussionId) => {
+        setCollapsed(false);
+        requestReveal(fileKey, { range, discussionId, fileDiff });
+      }}
+      options={{}}
+      renderHeaderFilenameSuffix={() => null}
+      renderHeaderPrefix={() => null}
+      onRevealSearchMatch={() => setCollapsed(false)}
+    />
+  );
+}
+
+it.each(["new", "old"] as const)(
+  "reveals collapsed %s-side context before focusing its exact discussion",
+  async (side) => {
+    container.style.height = "650px";
+    const before = Array.from({ length: 1000 }, (_, index) => `context ${index}`);
+    const after = before.with(899, "changed line");
+    const fileDiff = parseDiffFromFile(
+      { name: "context.txt", contents: before.join("\n") },
+      { name: "context.txt", contents: after.join("\n") },
+    );
+    const entry = discussion("context");
+    await publishDiscussions([
+      {
+        ...entry,
+        anchor: {
+          ...entry.anchor,
+          oldPath: "context.txt",
+          newPath: "context.txt",
+          side,
+          startLine: 400,
+          endLine: 400,
+          excerpt: "context 399",
+        },
+      },
+    ]);
+    await act(async () =>
+      root.render(
+        <RegistryContext.Provider value={registry}>
+          <ContextDiscussionView fileDiff={fileDiff} />
+        </RegistryContext.Provider>,
+      ),
+    );
+    await page.getByText("Discussions (1)", { exact: true }).click();
+    await discussionRow("context")
+      .getByRole("button", { name: "Go to discussion", exact: true })
+      .click();
+    await expectDiscussionFocused("context");
+    const diff = container.querySelector("diffs-container")!;
+    await expect.poll(() => diff.shadowRoot?.textContent).toContain("context 399");
+    await expect
+      .poll(() =>
+        Array.from(diff.shadowRoot?.querySelectorAll("[data-line][data-selected-line]") ?? []).some(
+          (line) => line.textContent?.includes("context 399"),
+        ),
+      )
+      .toBe(true);
+  },
+);

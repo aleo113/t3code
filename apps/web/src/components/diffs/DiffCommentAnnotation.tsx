@@ -24,6 +24,9 @@ interface DiffCommentAnnotationProps {
   placeholder?: string;
   submitLabel?: string;
   pending?: boolean;
+  validationError?: string | null;
+  awaitingConfirmation?: boolean;
+  disabled?: boolean;
   secondaryAction?: DiffCommentSecondaryAction;
   focusOnMount?: boolean;
 }
@@ -39,12 +42,16 @@ export function DiffCommentAnnotation({
   placeholder = "Add a comment…",
   submitLabel = "Comment",
   pending = false,
+  validationError,
+  awaitingConfirmation = false,
+  disabled = false,
   secondaryAction,
   focusOnMount = true,
 }: DiffCommentAnnotationProps) {
   const [localDraftText, setLocalDraftText] = useState("");
   const displayedText = kind === "draft" && !onTextChange ? localDraftText : text;
   const trimmedText = displayedText.trim();
+  const locked = pending || awaitingConfirmation;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useLayoutEffect(() => {
@@ -95,41 +102,58 @@ export function DiffCommentAnnotation({
         autoFocus={focusOnMount}
         size="sm"
         value={displayedText}
+        readOnly={locked}
         placeholder={placeholder}
         aria-label={`Comment on lines ${rangeLabel}`}
-        onChange={(event) => (onTextChange ?? setLocalDraftText)(event.target.value)}
+        onChange={(event) => {
+          if (!locked) (onTextChange ?? setLocalDraftText)(event.target.value);
+        }}
         onFocus={(event) => {
           const end = event.currentTarget.value.length;
           event.currentTarget.setSelectionRange(end, end);
         }}
         onKeyDown={(event) => {
-          if (event.key === "Escape") {
+          if (event.key === "Escape" && !locked) {
             event.preventDefault();
             onCancel();
           }
-          if (isCommentSubmitShortcut(event, trimmedText, pending)) {
+          if (isCommentSubmitShortcut(event, trimmedText, pending || disabled)) {
             event.preventDefault();
             onComment(trimmedText);
           }
         }}
       />
+      {validationError ? (
+        <p role="alert" className="mt-1 text-xs text-muted-foreground">
+          {validationError}
+        </p>
+      ) : null}
+      {awaitingConfirmation && !pending ? (
+        <p role="status" className="mt-1 text-xs text-muted-foreground">
+          Waiting to confirm this post was saved. Retry resends the same post.
+        </p>
+      ) : null}
       <div className="mt-1.5 flex items-center gap-1">
         <span className="mr-auto text-3xs text-muted-foreground/70">⌘/Ctrl Enter to send</span>
-        <Button variant="ghost-muted" size="xs" onClick={onCancel}>
+        <Button variant="ghost-muted" size="xs" disabled={locked} onClick={onCancel}>
           Cancel
         </Button>
         {secondaryAction ? (
           <Button
             size="xs"
             variant="outline"
-            disabled={!secondaryAction.allowEmpty && !trimmedText}
+            disabled={locked || (!secondaryAction.allowEmpty && !trimmedText)}
             onClick={() => secondaryAction.onAction(trimmedText)}
           >
             {secondaryAction.icon}
             {secondaryAction.label}
           </Button>
         ) : null}
-        <Button size="xs" disabled={pending || !trimmedText} onClick={() => onComment(trimmedText)}>
+        <Button
+          size="xs"
+          disabled={pending || disabled || !trimmedText}
+          onClick={() => onComment(trimmedText)}
+        >
           {submitLabel}
         </Button>
       </div>

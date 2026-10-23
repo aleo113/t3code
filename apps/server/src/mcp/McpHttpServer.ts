@@ -46,6 +46,8 @@ import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
 import * as AttachmentHandlers from "./toolkits/attachment/handlers.ts";
+import { ReviewDiscussionsToolkit } from "./toolkits/reviewDiscussions/tools.ts";
+import * as ReviewDiscussionsHandlers from "./toolkits/reviewDiscussions/handlers.ts";
 import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
@@ -1066,6 +1068,7 @@ export const layerMcpTransport = McpServer.layerHttp({
 }).pipe(Layer.provide(layerMcpAuthMiddleware));
 
 export const layer = Layer.mergeAll(
+  toolkitRegistration(ReviewDiscussionsToolkit, ReviewDiscussionsHandlers.layer),
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,

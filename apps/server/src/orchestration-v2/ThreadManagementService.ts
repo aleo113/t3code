@@ -9,6 +9,7 @@ import type {
 } from "./ProjectionStore.ts";
 import {
   type ChatAttachment,
+  type OrchestrationMessageContext,
   CommandId,
   MessageId,
   OrchestrationV2StopWorkflowError,
@@ -127,6 +128,7 @@ export interface ThreadManagementSendInput {
   readonly senderThreadId?: ThreadId;
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
+  readonly context?: OrchestrationMessageContext;
   readonly modelSelection?: ModelSelection;
   readonly mode: ThreadManagementSendMode;
   readonly createdBy: OrchestrationV2Actor;
@@ -790,6 +792,7 @@ const make = Effect.gen(function* () {
       ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
       text: input.text,
       attachments: input.attachments,
+      ...(input.context === undefined ? {} : { context: input.context }),
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       dispatchMode,
       createdBy: input.createdBy,

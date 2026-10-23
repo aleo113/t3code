@@ -371,3 +371,33 @@ describe("toComposerContextId", () => {
     expect(first.length).toBeLessThanOrEqual(128);
   });
 });
+
+it("routes optional inline discussion replies in provider context while preserving ordinary review cards", () => {
+  const contextId = toKindScopedComposerContextId("review-comment", "post-id");
+  const record = {
+    version: 1 as const,
+    kind: "review-comment" as const,
+    contextId,
+    label: "a.ts new L2",
+    sectionId: "working-tree",
+    sectionTitle: "Uncommitted",
+    filePath: "a.ts",
+    startIndex: 2,
+    endIndex: 2,
+    rangeLabel: "new L2",
+    text: "",
+    diff: "const value = 1;",
+  };
+  const text = "Explain this line\n\n" + formatComposerContextReference(record);
+  const ordinary = projectComposerContextForProvider({ text, records: [record] });
+  expect(ordinary).not.toContain("discussionId:");
+  expect(ordinary).not.toContain("diff_discussion_reply");
+  const projected = projectComposerContextForProvider({
+    text,
+    records: [{ ...record, discussionId: "discussion-42" }],
+  });
+  expect(projected).toContain("discussionId: discussion-42");
+  expect(projected).toContain("diff_discussion_reply");
+  expect(projected).toContain("inline, in chat, or both");
+  expect(projected).toContain("const value = 1;");
+});
