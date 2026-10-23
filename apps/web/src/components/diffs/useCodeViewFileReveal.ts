@@ -68,7 +68,14 @@ export function useCodeViewFileReveal<TScope>(
       // materialize a target; the row's Go button remains available for retry.
       if (++attempts > 120) return;
       const item = instance.getItem(request.fileKey);
-      if (!item || item.type !== "diff" || item.fileDiff !== discussion.fileDiff) return;
+      if (!item || item.type !== "diff") return;
+      // Inline previews reparse the same patch on re-render. Their content cache
+      // key stays stable even when the metadata object changes.
+      if (
+        item.fileDiff !== discussion.fileDiff &&
+        (!discussion.fileDiff.cacheKey || item.fileDiff.cacheKey !== discussion.fileDiff.cacheKey)
+      )
+        return;
       if (item.collapsed) {
         frame = requestAnimationFrame(reveal);
         return;
@@ -94,10 +101,13 @@ export function useCodeViewFileReveal<TScope>(
           return;
         }
         instance.setSelectedLines({ id: request.fileKey, range: discussion.range });
+        // Annotations attach to the range end. Centering a taller-than-viewport
+        // range aligns its start instead, leaving the discussion virtualized out.
         viewer.scrollTo({
-          type: "range",
+          type: "line",
           id: request.fileKey,
-          range: discussion.range,
+          lineNumber: discussion.range.end,
+          side: discussion.range.endSide ?? discussion.range.side ?? "additions",
           align: "center",
         });
         positioned = true;

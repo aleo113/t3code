@@ -15,7 +15,7 @@ import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { act, useState } from "react";
-import { parseDiffFromFile, type FileDiffMetadata } from "@pierre/diffs";
+import { CodeView, parseDiffFromFile, type FileDiffMetadata } from "@pierre/diffs";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -105,7 +105,7 @@ const discussionPermissionAtom = Atom.keepAlive(Atom.make(false));
 const configAtom = Atom.make(null);
 const collapsedAtom = Atom.make(true);
 const checkpointAtom = Atom.make<string | null>(null);
-const previewAtom = Atom.make(
+let previewAtom = Atom.make(
   AsyncResult.success<ReviewDiffPreviewResult>({
     cwd: "/repo",
     generatedAt: DateTime.makeUnsafe("2026-10-16T00:00:00Z"),
@@ -343,6 +343,171 @@ it("lists unvalidated discussions, loads a provisional added-file key, and focus
   await scrollToStart();
   await expect.element(toggle("a.txt", false)).toBeInTheDocument();
 });
+
+it.each(["new", "old"] as const)(
+  "reveals the exact discussion after one pointer click on a multi-viewport %s-side range",
+  async (side) => {
+    container.style.height = "650px";
+    const before = Array.from({ length: 600 }, (_, index) => `before ${index}`);
+    const after = Array.from({ length: 600 }, (_, index) => `after ${index}`);
+    const saved = discussion("long-range");
+    const entry = {
+      ...saved,
+      anchor: {
+        ...saved.anchor,
+        side,
+        startLine: 50,
+        endLine: 500,
+        excerpt: (side === "old" ? before : after).slice(49, 500).join("\n"),
+      },
+    };
+    const patch = {
+      ...loadedPatch("e.txt"),
+      diff: `diff --git a/e.txt b/e.txt\n--- a/e.txt\n+++ b/e.txt\n@@ -1,600 +1,600 @@\n${before.map((line) => `-${line}`).join("\n")}\n${after.map((line) => `+${line}`).join("\n")}\n`,
+    };
+    await publishDiscussions([{ ...entry, id: "same-range" }, entry]);
+    const selection = vi.spyOn(CodeView.prototype, "setSelectedLines");
+    try {
+      await render();
+      await selectTreeFile("e.txt");
+      await act(async () => registry.set(patchAtoms("e.txt"), AsyncResult.success(patch)));
+      await page.getByText("Discussions (2)", { exact: true }).click();
+      await expect.poll(() => discussionRow(entry.id).element().textContent).toContain("Current");
+      const go = discussionRow(entry.id).getByRole("button", {
+        name: "Go to discussion",
+        exact: true,
+      });
+      const pointerDown = vi.fn();
+      go.element().addEventListener("pointerdown", pointerDown);
+      await go.click();
+      expect(pointerDown).toHaveBeenCalledTimes(1);
+      await expect
+        .poll(() => document.activeElement?.getAttribute("data-diff-discussion"), { timeout: 5000 })
+        .toBe(entry.id);
+      await expect
+        .poll(() => {
+          const thread = document.activeElement!;
+          const comment = Array.from(thread.querySelectorAll("p")).find(
+            (element) => element.textContent === `Question ${entry.id}`,
+          );
+          const header = thread
+            .closest("diffs-container")
+            ?.shadowRoot?.querySelector("[data-diffs-header]");
+          if (!comment || !header) return false;
+          const rect = comment.getBoundingClientRect();
+          const bounds = viewport().getBoundingClientRect();
+          return (
+            rect.height > 0 &&
+            rect.top >= Math.max(bounds.top, header.getBoundingClientRect().bottom) &&
+            rect.bottom <= bounds.bottom
+          );
+        })
+        .toBe(true);
+      const viewer = selection.mock.contexts.at(-1) as CodeView | undefined;
+      expect(viewer?.getSelectedLines()?.range).toEqual({
+        start: 50,
+        end: 500,
+        side: side === "old" ? "deletions" : "additions",
+        endSide: side === "old" ? "deletions" : "additions",
+      });
+    } finally {
+      selection.mockRestore();
+    }
+  },
+);
+
+it.each([
+  { path: "a.txt", start: 15, end: 15 },
+  { path: "d.txt", start: 48, end: 75 },
+])(
+  "reveals $path lines $start–$end in a reparsed inline preview with many discussions",
+  async ({ path, start, end }) => {
+    container.style.height = "650px";
+    const lines = Array.from({ length: 80 }, (_, index) => `after ${index}`);
+    const filePaths = ["a.txt", "b.txt", "c.txt", "d.txt"];
+    const entries = filePaths.flatMap((filePath) =>
+      [15, 25, 35, 45, 55, 65, 75].map((line) => {
+        const entry = discussion(`${filePath}:${line}`);
+        return {
+          ...entry,
+          anchor: {
+            ...entry.anchor,
+            oldPath: filePath,
+            newPath: filePath,
+            startLine: line === 75 ? 48 : line,
+            endLine: line,
+            excerpt: lines.slice(line === 75 ? 47 : line - 1, line).join("\n"),
+          },
+          messages: entry.messages.map((message) => ({
+            ...message,
+            text: `Discussion ${entry.id}. ${"An explanation of this small selection. ".repeat(9)}`,
+          })),
+        };
+      }),
+    );
+    const savedPreview = previewAtom;
+    previewAtom = Atom.make(
+      AsyncResult.success<ReviewDiffPreviewResult>({
+        cwd: "/repo",
+        generatedAt: DateTime.makeUnsafe("2026-10-16T00:00:00Z"),
+        sources: [
+          {
+            ...source,
+            truncated: false,
+            diff: filePaths
+              .map(
+                (filePath) =>
+                  `diff --git a/${filePath} b/${filePath}\n--- a/${filePath}\n+++ b/${filePath}\n@@ -1 +1,80 @@\n-before\n${lines.map((line) => `+${line}`).join("\n")}\n`,
+              )
+              .join(""),
+          },
+        ],
+      }),
+    );
+    const selection = vi.spyOn(CodeView.prototype, "setSelectedLines");
+    try {
+      await publishDiscussions(entries);
+      await render();
+      await page.getByText("Discussions (28)", { exact: true }).click();
+      const id = `${path}:${end}`;
+      const go = discussionRow(id).getByRole("button", { name: "Go to discussion", exact: true });
+      const pointerDown = vi.fn();
+      go.element().addEventListener("pointerdown", pointerDown);
+      await go.click();
+      expect(pointerDown).toHaveBeenCalledTimes(1);
+      await expect
+        .poll(() => document.activeElement?.getAttribute("data-diff-discussion"), { timeout: 3000 })
+        .toBe(id);
+      await expect
+        .poll(() => {
+          const thread = document.activeElement!;
+          const comment = thread.querySelector("p")!;
+          const header = thread
+            .closest("diffs-container")
+            ?.shadowRoot?.querySelector("[data-diffs-header]");
+          if (!comment || !header) return false;
+          const rect = comment.getBoundingClientRect();
+          const bounds = viewport().getBoundingClientRect();
+          return (
+            rect.height > 0 &&
+            rect.top >= Math.max(bounds.top, header.getBoundingClientRect().bottom) &&
+            rect.bottom <= bounds.bottom
+          );
+        })
+        .toBe(true);
+      const viewer = selection.mock.contexts.at(-1) as CodeView | undefined;
+      expect(viewer?.getSelectedLines()?.range).toEqual({
+        start,
+        end,
+        side: "additions",
+        endSide: "additions",
+      });
+    } finally {
+      selection.mockRestore();
+      previewAtom = savedPreview;
+    }
+  },
+);
 
 it("waits for a confirmed Show poll before navigating and does not reopen a resolved discussion", async () => {
   container.style.height = "650px";
